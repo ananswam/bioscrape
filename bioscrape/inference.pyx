@@ -126,15 +126,23 @@ cdef class BulkData(Data):
     def has_multiple_timepoints(self):
         return self.multiple_timepoints
 
-#Data consists of a set of N flow samples which each contain measurements for M measured_species
-#Data Dimensions:
-# timepoints: None
-# Measurements: N x M
+# Data consists of a set of N flow samples at nS sample times which each contain measurements for M measured_species
+# Data Dimensions:
+# timepoints:  
+# Measurements: nS x M (nS x M x N for N samples)
 # Measured Species: M
 cdef class FlowData(Data):
-    def set_data(self,np.ndarray timepoints, np.ndarray measurements, list measured_species, unsigned N):
-        if timepoints is not None:
-            raise ValueError("Flow Data is assumed to be collected at a single timepoint")
+    def set_data(self, np.ndarray time_samples, np.ndarray measurements, list measured_species, unsigned N):
+        if time_samples.ndim > 1:
+            raise ValueError("Flow Data is assumed to be collected at a list of sample timepoints. It cannot have dimension > 1.")
+
+        self.nS = time_samples.shape[0]
+        if self.nS == 1:
+            self.multiple_time_samples = False
+        elif self.nS > 1:
+            self.multiple_time_samples = True
+
+        self.time_samples = time_samples
 
         self.measured_species = measured_species
         self.M = len(self.measured_species)
@@ -145,6 +153,8 @@ cdef class FlowData(Data):
             self.measurements = measurements
             self.N = measurements.shape[0]
         
+    def has_multiple_samples(self):
+        return self.multiple_time_samples
 
 #Data consists of a set of N stochastic trajectories at T timepoints which each contain measurements of M measured_species.
 #Data Dimensions:
@@ -462,7 +472,6 @@ cdef class StochasticTrajectoryMomentLikelihood(StochasticTrajectoriesLikelihood
 cdef class StochasticStatesLikelihood(ModelLikelihood):
     def set_model(self, Model m, RegularSimulator prop = None, CSimInterface csim = None):
         self.m = m
-
         if csim is None:
             csim = ModelCSimInterface(m)
         if prop is None:
@@ -480,6 +489,89 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         self.meas_indices = np.zeros(len(the_list), dtype=int)
         for i in range(len(the_list)):
             self.meas_indices[i] = self.m.get_species_index(the_list[i])
+    
+    def py_get_data(self):
+        return self.fd
+
+    def set_likelihood_options(self, N_simulations = None, moment_weights = None, moment_order = None, norm_order = None):
+
+        # One out of norm_order and moment_order is necessary
+        if norm_order is not None:
+            if moment_order:
+                raise ValueError('Both moment_order and norm_order given for cost computation.')
+            self.norm_order = norm_order
+        if norm_order in [0]:
+            self.norm_order = 1
+        
+        if moment_order is not None:
+            if norm_order:
+                raise ValueError('Both moment_order and norm_order given for cost computation.')
+            if moment_order == 1 or moment_order == 2:
+                self.moment_order = moment_order
+                if moment_weights is not None:
+                    if len(moment_weights) == moment_order:
+                        self.moment_weights = moment_weights # must be a list of len equal to moment_order
+                else:
+                    self.moment_weights = list(np.ones(moment_order))
+            else:
+                raise NotImplementedError('Only first and second order moments implemented for cost computations.')
+
+
+        if N_simulations is not None:
+            self.N_simulations = N_simulations
+        if self.N_simulations in [None, 0]:
+            self.N_simulations = 1
+
+    def py_get_N_simulations(self):
+        return self.N_simulations
+    def py_get_norm_order(self):
+        return self.norm_order
+    def py_get_moment_order(self):
+        return self.moment_order
+
+    cdef double get_log_likelihood(self):
+        # TODO write this for Flow data
+        # Write in the specific parameters and species values.
+        cdef np.ndarray species_vals = self.m.get_species_values()
+        cdef np.ndarray param_vals = self.m.get_params_values()
+        cdef np.ndarray ans
+        cdef np.ndarray time_samples
+
+        cdef unsigned i
+        cdef unsigned n
+        cdef unsigned s
+        cdef double error = 0.0
+
+        # Do N*N_simulations simulations of the model with time samples specified by the data.
+        for n in range(self.N):
+            #Set Timepoints
+            if self.sd.has_multiple_timepoints():
+                timepoints = self.sd.get_timepoints()[n, :]
+            else:
+                timepoints = self.sd.get_timepoints()
+
+            for s in range(self.N_simulations):
+                #Set initial parameters (inside loop in case they change in the simulation):
+                if self.init_param_indices is not None:
+                    for i in range(self.init_param_indices.shape[0]):
+                        param_vals[ self.init_param_indices[i] ] = self.init_param_vals[i]                
+
+                #Set Initial Conditions (Inside loop in case things change in the simulation)
+                if self.Nx0 == 1:#Run all the simulations from the same initial state
+                    for i in range(self.M):
+                        species_vals[self.init_state_indices[i]] = self.init_state_vals[i]
+                elif self.Nx0 == self.N: #Different initial conditions for different simulations
+                    for i in range(self.M):
+                        species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
+
+                
+
+                ans = self.propagator.simulate(self.csim, timepoints).get_result()
+
+
+                for i in range(self.M):
+                    error += np.linalg.norm( self.sd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
+        return -1.0*error/(1.0*self.N_simulations)
 
 ##################################################                ####################################################
 ######################################              PRIORS        ######################################
