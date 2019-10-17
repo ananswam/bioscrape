@@ -56,6 +56,7 @@ cdef class BulkData(Data):
 cdef class FlowData(Data):
     # cdef unsigned nS # Number of time samples at which flow data is taken
     cdef unsigned multiple_timepoints
+    cdef unsigned L
     cdef unsigned nT #Number of timepoints
     cdef np.ndarray get_measurements(self)
 cdef class StochasticTrajectories(Data):

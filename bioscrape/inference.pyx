@@ -135,27 +135,28 @@ cdef class BulkData(Data):
 cdef class FlowData(Data):
     cdef np.ndarray get_measurements(self):
         # TODO : Fix this
-        return np.reshape(self.measurements, (len(self.timepoints), self.N, self.M))
+        return np.reshape(self.measurements, (len(self.timepoints), self.N, self.L, self.M))
 
     def set_data(self, np.ndarray timepoints, np.ndarray measurements, list measured_species, unsigned N):
         if timepoints.ndim > 1:
             raise ValueError("Flow Data is assumed to be collected at a list of sample timepoints. It cannot have dimension > 1.")
 
-        nS = timepoints.shape[0]
-        if nS != measurements.shape[0]:
+        nT = timepoints.shape[0]
+        if nT != measurements.shape[0]:
             raise ValueError('First dimension of measurements must be same as the number of time samples in timepoints array.')
-        if nS == 1:
+        if nT == 1:
             self.multiple_timepoints = False
-        elif nS > 1:
+        elif nT > 1:
             self.multiple_timepoints = True
-
+        self.nT = nT
         self.timepoints = timepoints
 
         self.measured_species = measured_species
         self.M = len(self.measured_species)
+        self.L = measurements.shape[2] 
 
         if measurements.shape[3] != self.M:
-            raise ValueError("Second dimension of measurments must be the same length as measured_species")
+            raise ValueError("Fourth dimension of measurments must be the same length as measured_species")
         else:
             self.measurements = measurements
             self.N = measurements.shape[1]
@@ -390,9 +391,7 @@ cdef class StochasticTrajectoriesLikelihood(ModelLikelihood):
 
         #Get Species Model Indices
         species_list = sd.get_measured_species()
-        self.M = len(species_list) #Number of
         self.meas_indices = np.zeros(len(species_list), dtype=int)
-
         self.M = len(species_list)
         for i in range(len(species_list)):
             self.meas_indices[i] = self.m.get_species_index(species_list[i])
@@ -493,11 +492,21 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
 
     def set_data(self, FlowData fd):
         self.fd = fd
-        the_list = fd.get_measured_species()
-        self.meas_indices = np.zeros(len(the_list), dtype=int)
-        for i in range(len(the_list)):
-            self.meas_indices[i] = self.m.get_species_index(the_list[i])
-    
+        self.N = fd.get_N() #Number of samples
+
+        species_list = fd.get_measured_species()
+        self.meas_indices = np.zeros(len(species_list), dtype=int)
+        self.M = len(species_list) 
+        for i in range(len(species_list)):
+            self.meas_indices[i] = self.m.get_species_index(species_list[i])
+        #Get Species Model Indices
+        #The number of intitial conditions in the likelihood model must either:
+        # 1: Same initial condition used for all samples
+        # N: Unique initial condition used for each sample
+        if not ((self.N == 1 or self.Nx0 == 1) or (self.Nx0 == self.N)):
+            raise ValueError("Either the number of samples and the number of initial conditions match or one of them must be 1")
+
+
     def py_get_data(self):
         return self.fd
 
@@ -547,13 +556,13 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         cdef np.ndarray timepoints
 
         cdef unsigned i
+        cdef unsigned sample 
         cdef unsigned n
         cdef unsigned s
         cdef double error = 0.0
 
         # Do nS*N*N_simulations simulations of the model with time samples specified by the data.
         for sample in range(len(self.fd.get_timepoints())):
-            nSi = self.fd.get_timepoints()[sample]
             for n in range(self.N):
                 for s in range(self.N_simulations):
                     #Set initial parameters (inside loop in case they change in the simulation):
@@ -568,21 +577,21 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
                     elif self.Nx0 == self.N: #Different initial conditions for different simulations
                         for i in range(self.M):
                             species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
-                    ans = self.propagator.simulate(self.csim, np.array([0, nSi])).get_result()
+                    ans = self.propagator.simulate(self.csim, np.array([0, self.fd.get_timepoints()[sample]])).get_result()
 
 
                     for i in range(self.M):
                         if self.norm_order:
-                            error += np.linalg.norm( self.fd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
+                            error += np.linalg.norm( self.fd.get_measurements()[sample, n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
                         elif self.moment_order:
-                            exp_data_i = self.fd.get_measurements()[n, :,i]
-                            sim_dat_i = ans[:,self.meas_indices[i]]
+                            exp_data_i = self.fd.get_measurements()[sample, n, :,i] # nT x N x L x M
+                            sim_data_i = ans[:,self.meas_indices[i]]
                             for ord_i in range(self.moment_order):
                                 wt = self.moment_weights[ord_i]
                                 if ord_i == 1:
-                                    error += wt * (stats.mean(exp_data_i, ord_i) - stats.mean(sim_dat_i, ord_i)) 
+                                    error += wt * (np.mean(exp_data_i) - np.mean(sim_data_i)) 
                                 else:
-                                    error += wt * (stats.moment(exp_data_i, ord_i) - stats.moment(sim_dat_i, ord_i)) 
+                                    error += wt * (stats.moment(exp_data_i, ord_i) - stats.moment(sim_data_i, ord_i)) 
 
         return -1.0*error/(1.0*self.N_simulations)
 
