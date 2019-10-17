@@ -159,7 +159,7 @@ cdef class FlowData(Data):
 #Data consists of a set of N stochastic trajectories at T timepoints which each contain measurements of M measured_species.
 #Data Dimensions:
 # timepoints: N x T
-# Measurements: N x T x M
+# Measurements Data: N x T x M
 # Measured Species: M
 cdef class StochasticTrajectories(Data):
 
@@ -542,35 +542,39 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         cdef unsigned s
         cdef double error = 0.0
 
-        # Do N*N_simulations simulations of the model with time samples specified by the data.
-        for n in range(self.N):
-            #Set Timepoints
-            if self.sd.has_multiple_timepoints():
-                timepoints = self.sd.get_timepoints()[n, :]
-            else:
-                timepoints = self.sd.get_timepoints()
+        # Do nS*N*N_simulations simulations of the model with time samples specified by the data.
+        for sample in self.nS:
+            nSi = time_samples[sample]
+            for n in range(self.N):
+                for s in range(self.N_simulations):
+                        #Set initial parameters (inside loop in case they change in the simulation):
+                        if self.init_param_indices is not None:
+                            for i in range(self.init_param_indices.shape[0]):
+                                param_vals[ self.init_param_indices[i] ] = self.init_param_vals[i]                
 
-            for s in range(self.N_simulations):
-                #Set initial parameters (inside loop in case they change in the simulation):
-                if self.init_param_indices is not None:
-                    for i in range(self.init_param_indices.shape[0]):
-                        param_vals[ self.init_param_indices[i] ] = self.init_param_vals[i]                
+                    #Set Initial Conditions (Inside loop in case things change in the simulation)
+                    if self.Nx0 == 1:#Run all the simulations from the same initial state
+                        for i in range(self.M):
+                            species_vals[self.init_state_indices[i]] = self.init_state_vals[i]
+                    elif self.Nx0 == self.N: #Different initial conditions for different simulations
+                        for i in range(self.M):
+                            species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
+                    ans = self.propagator.simulate(self.csim, np.array([0, nSi])).get_result()
 
-                #Set Initial Conditions (Inside loop in case things change in the simulation)
-                if self.Nx0 == 1:#Run all the simulations from the same initial state
+
                     for i in range(self.M):
-                        species_vals[self.init_state_indices[i]] = self.init_state_vals[i]
-                elif self.Nx0 == self.N: #Different initial conditions for different simulations
-                    for i in range(self.M):
-                        species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
+                        if self.norm_order:
+                            error += np.linalg.norm( self.fd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
+                        elif moment_order:
+                            exp_data_i = self.fd.get_measurements()[n, :,i]
+                            sim_dat_i = ans[:,self.meas_indices[i]]
+                            for ord_i in range(moment_order):
+                                wt = self.moment_weights[ord_i]
+                                if ord_i == 1:
+                                    error += wt * (stats.mean(exp_data_i, ord_i) - stats.mean(sim_dat_i, ord_i)) 
+                                else:
+                                    error += wt * (stats.moment(exp_data_i, ord_i) - stats.moment(sim_dat_i, ord_i)) 
 
-                
-
-                ans = self.propagator.simulate(self.csim, timepoints).get_result()
-
-
-                for i in range(self.M):
-                    error += np.linalg.norm( self.sd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
         return -1.0*error/(1.0*self.N_simulations)
 
 ##################################################                ####################################################
