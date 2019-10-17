@@ -1,5 +1,6 @@
 cimport numpy as np
 import numpy as np
+import scipy.stats as stats
 from libc.math cimport log
 
 from types import Model
@@ -132,29 +133,36 @@ cdef class BulkData(Data):
 # Measurements: nS x M (nS x M x N for N samples)
 # Measured Species: M
 cdef class FlowData(Data):
-    def set_data(self, np.ndarray time_samples, np.ndarray measurements, list measured_species, unsigned N):
-        if time_samples.ndim > 1:
+    cdef np.ndarray get_measurements(self):
+        # TODO : Fix this
+        return np.reshape(self.measurements, (len(self.timepoints), self.N, self.M))
+
+    def set_data(self, np.ndarray timepoints, np.ndarray measurements, list measured_species, unsigned N):
+        if timepoints.ndim > 1:
             raise ValueError("Flow Data is assumed to be collected at a list of sample timepoints. It cannot have dimension > 1.")
 
-        self.nS = time_samples.shape[0]
-        if self.nS == 1:
-            self.multiple_time_samples = False
-        elif self.nS > 1:
-            self.multiple_time_samples = True
+        nS = timepoints.shape[0]
+        if nS != measurements.shape[0]:
+            raise ValueError('First dimension of measurements must be same as the number of time samples in timepoints array.')
+        if nS == 1:
+            self.multiple_timepoints = False
+        elif nS > 1:
+            self.multiple_timepoints = True
 
-        self.time_samples = time_samples
+        self.timepoints = timepoints
 
         self.measured_species = measured_species
         self.M = len(self.measured_species)
 
-        if measurements.shape[1] != self.M:
+        if measurements.shape[3] != self.M:
             raise ValueError("Second dimension of measurments must be the same length as measured_species")
         else:
             self.measurements = measurements
-            self.N = measurements.shape[0]
+            self.N = measurements.shape[1]
+
         
-    def has_multiple_samples(self):
-        return self.multiple_time_samples
+    def has_multiple_timepoints(self):
+        return self.multiple_timepoints
 
 #Data consists of a set of N stochastic trajectories at T timepoints which each contain measurements of M measured_species.
 #Data Dimensions:
@@ -163,7 +171,7 @@ cdef class FlowData(Data):
 # Measured Species: M
 cdef class StochasticTrajectories(Data):
 
-    cdef  np.ndarray get_measurements(self):
+    cdef np.ndarray get_measurements(self):
         return np.reshape(self.measurements, (self.N, self.nT, self.M))
 
     def set_data(self, np.ndarray timepoints, np.ndarray measurements, list measured_species, unsigned N):
@@ -510,9 +518,9 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
                 self.moment_order = moment_order
                 if moment_weights is not None:
                     if len(moment_weights) == moment_order:
-                        self.moment_weights = moment_weights # must be a list of len equal to moment_order
+                        self.moment_weights = moment_weights # must be a list of np.ndarray equal to moment_order
                 else:
-                    self.moment_weights = list(np.ones(moment_order))
+                    self.moment_weights = np.ones(moment_order)
             else:
                 raise NotImplementedError('Only first and second order moments implemented for cost computations.')
 
@@ -528,14 +536,15 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         return self.norm_order
     def py_get_moment_order(self):
         return self.moment_order
+    def py_get_moment_weights(self):
+        return self.moment_weights
 
     cdef double get_log_likelihood(self):
-        # TODO write this for Flow data
         # Write in the specific parameters and species values.
         cdef np.ndarray species_vals = self.m.get_species_values()
         cdef np.ndarray param_vals = self.m.get_params_values()
         cdef np.ndarray ans
-        cdef np.ndarray time_samples
+        cdef np.ndarray timepoints
 
         cdef unsigned i
         cdef unsigned n
@@ -543,14 +552,14 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         cdef double error = 0.0
 
         # Do nS*N*N_simulations simulations of the model with time samples specified by the data.
-        for sample in self.nS:
-            nSi = time_samples[sample]
+        for sample in range(len(self.fd.get_timepoints())):
+            nSi = self.fd.get_timepoints()[sample]
             for n in range(self.N):
                 for s in range(self.N_simulations):
-                        #Set initial parameters (inside loop in case they change in the simulation):
-                        if self.init_param_indices is not None:
-                            for i in range(self.init_param_indices.shape[0]):
-                                param_vals[ self.init_param_indices[i] ] = self.init_param_vals[i]                
+                    #Set initial parameters (inside loop in case they change in the simulation):
+                    if self.init_param_indices is not None:
+                        for i in range(self.init_param_indices.shape[0]):
+                            param_vals[ self.init_param_indices[i] ] = self.init_param_vals[i]                
 
                     #Set Initial Conditions (Inside loop in case things change in the simulation)
                     if self.Nx0 == 1:#Run all the simulations from the same initial state
@@ -565,10 +574,10 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
                     for i in range(self.M):
                         if self.norm_order:
                             error += np.linalg.norm( self.fd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
-                        elif moment_order:
+                        elif self.moment_order:
                             exp_data_i = self.fd.get_measurements()[n, :,i]
                             sim_dat_i = ans[:,self.meas_indices[i]]
-                            for ord_i in range(moment_order):
+                            for ord_i in range(self.moment_order):
                                 wt = self.moment_weights[ord_i]
                                 if ord_i == 1:
                                     error += wt * (stats.mean(exp_data_i, ord_i) - stats.mean(sim_dat_i, ord_i)) 

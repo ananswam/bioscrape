@@ -54,8 +54,10 @@ cdef class BulkData(Data):
 
     
 cdef class FlowData(Data):
-    pass
-
+    # cdef unsigned nS # Number of time samples at which flow data is taken
+    cdef unsigned multiple_timepoints
+    cdef unsigned nT #Number of timepoints
+    cdef np.ndarray get_measurements(self)
 cdef class StochasticTrajectories(Data):
     cdef unsigned multiple_timepoints
     cdef unsigned nT #Number of timepoints
@@ -107,7 +109,10 @@ cdef class StochasticTrajectoryMomentLikelihood(StochasticTrajectoriesLikelihood
 cdef class StochasticStatesLikelihood(ModelLikelihood):
     cdef FlowData fd
     cdef unsigned N_simulations
-    cdef unsigned Moments
+    cdef unsigned moment_order
+    cdef np.ndarray moment_weights
+    cdef unsigned norm_order
+    cdef np.ndarray timepoints
     cdef double get_log_likelihood(self)
 
 ##################################################                ####################################################
