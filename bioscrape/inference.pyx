@@ -134,7 +134,6 @@ cdef class BulkData(Data):
 # Measured Species: M
 cdef class FlowData(Data):
     cdef np.ndarray get_measurements(self):
-        # TODO : Fix this
         return np.reshape(self.measurements, (len(self.timepoints), self.N, self.L, self.M))
 
     def set_data(self, np.ndarray timepoints, np.ndarray measurements, list measured_species, unsigned N):
