@@ -9,7 +9,7 @@ import emcee
 import matplotlib.pyplot as plt
 from bioscrape.types import Model, read_model_from_sbml
 from bioscrape.simulator import ModelCSimInterface, DeterministicSimulator, SSASimulator
-from bioscrape.pid_interfaces import StochasticInference, DeterministicInference
+from bioscrape.pid_interfaces import StochasticInference, DeterministicInference, StochasticStatesInference, StochasticSensorFusion
 
 def initialize_mcmc():
     obj = MCMC()
@@ -30,7 +30,9 @@ class MCMC(object):
         self.measurements = ['']
         self.initial_conditions = None
         self.norm_order = 2
-        self.N_simulations = 3
+        self.moment_order = 2
+        self.moment_weights = [1,1]
+        self.N_simulations = 100
         self.LL_data = None
         self.debug = False
         return 
@@ -61,12 +63,18 @@ class MCMC(object):
         initial_conditions = kwargs.get('initial_conditions')
 
         norm_order = kwargs.get('norm_order')
+        moment_order = kwargs.get('moment_order')
+        moment_weights = kwargs.get('moment_weights')
         N_simulations = kwargs.get('N_simulations')
         debug = kwargs.get('debug')
         if N_simulations:
             self.N_simulations = N_simulations # Number of simulations per sample to compare to
         if norm_order:
             self.norm_order = norm_order # (integer) Which norm to use: 1-Norm, 2-norm, etc.
+        if moment_order:
+            self.moment_order = moment_order # (integer) Which central moments to use: until 1, 2, 
+        if moment_weights:
+            self.moment_weights = moment_weights # (integer) What moment weights to use: a list with length same as moment_order
         if debug:
             self.debug = debug
         if type(timepoints) is list:
@@ -97,12 +105,15 @@ class MCMC(object):
             self.initial_conditions = initial_conditions
         elif type(initial_conditions) is list and len(initial_conditions):
             self.initial_conditions = initial_conditions
-        self.LL_data = self.extract_data(self.exp_data)
+        if self.type == 'flow':
+            self.LL_data = self.exp_data
+        else:
+            self.LL_data = self.extract_data(self.exp_data)
 
     def extract_data(self, exp_data):
         # Get timepoints from given experimental data
         if isinstance(self.timepoints, (list, np.ndarray)):
-            warnings.warn('Timepoints given by user, not using the data to extract the timepoints automatically.')
+            warnings.warn('Are you sure? Timepoints given by user, not using the data to extract the timepoints automatically.')
         M = len(self.measurements)# Number of measurements
         # Multiple trajectories case 
         if type(self.exp_data) is list:
@@ -117,7 +128,7 @@ class MCMC(object):
                     timepoint_i = np.array(df.get(self.time_column)).flatten()
                     timepoints_list.append(timepoint_i)
                 else:
-                    raise TypeError('time_column attribute of MCMC object must be a string.')
+                    raise TypeError('time_column attribute of the data object must be a string.')
 
                 # Extract measurements    
                 if type(self.measurements) is list and len(self.measurements) == 1:
@@ -133,7 +144,8 @@ class MCMC(object):
                 data_i = np.reshape(data_i, (T, M))
                 data_list_final.append(data_i)
             data = np.array(data_list_final)
-            self.timepoints = timepoints_list
+            if self.timepoints == None:
+                self.timepoints = timepoints_list
             N = len(exp_data)# Number of trajectories
             T = len(timepoints_list[0])
             data = np.reshape(data, (N,T,M))
@@ -174,7 +186,14 @@ class MCMC(object):
     def cost_function(self, log_params):
         if self.type == 'stochastic':
             pid_interface = StochasticInference(self.params_to_estimate, self.M, self.prior)
-            return pid_interface.get_likelihood_function(log_params, self.LL_data, self.timepoints, self.measurements, self.initial_conditions, norm_order = self.norm_order, N_simulations = self.N_simulations, debug = self.debug)
+            return pid_interface.get_likelihood_function(log_params, self.LL_data, self.timepoints, self.measurements,
+                                                        self.initial_conditions, norm_order = self.norm_order, N_simulations = self.N_simulations, debug = self.debug)
+        elif self.type == 'flow':
+            pid_interface = StochasticStatesInference(self.params_to_estimate, self.M, self.prior)
+            return pid_interface.get_likelihood_function(log_params, self.LL_data, self.timepoints, self.measurements, 
+                                                        self.initial_conditions, norm_order = self.norm_order, moment_order = moment_order, 
+                                                        moment_weights = moment_weights, N_simulations = self.N_simulations, debug = self.debug)
+
         elif self.type == 'deterministic':
             pid_interface = DeterministicInference(self.params_to_estimate, self.M, self.prior)
             return pid_interface.get_likelihood_function(log_params, self.LL_data, self.timepoints, self.measurements, self.initial_conditions, norm_order = self.norm_order, debug = self.debug)
@@ -337,99 +356,99 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
         print()
 
 
-class ExpData:
-    def __init__(self, name, type, data):
-        '''
-        name : string representing the name of the data set 
-        type : type of data set - whether time series (Use string 'timeseries') or distributional (use 'distrib')
-        data : Pandas data frame
-        '''
-        self.name = name
-        self.type = type
-        self.data = data 
+# class ExpData:
+#     def __init__(self, name, type, data):
+#         '''
+#         name : string representing the name of the data set 
+#         type : type of data set - whether time series (Use string 'timeseries') or distributional (use 'distrib')
+#         data : Pandas data frame
+#         '''
+#         self.name = name
+#         self.type = type
+#         self.data = data 
 
-    def get_df(self):
-        ''' 
-        Returns the Pandas data frame object 
-        '''
-        return self.data
+#     def get_df(self):
+#         ''' 
+#         Returns the Pandas data frame object 
+#         '''
+#         return self.data
 
-    def get_keys(self):
-        '''
-        Returns the key list of the Pandas data frame data
-        '''
-        return list(self.data.keys())
+#     def get_keys(self):
+#         '''
+#         Returns the key list of the Pandas data frame data
+#         '''
+#         return list(self.data.keys())
 
-    def get_values(self, key):
-        '''
-        Returns the values as a list of the Pandas data frame object data with given key 
-        '''
-        return list(self.data.get(key))
+#     def get_values(self, key):
+#         '''
+#         Returns the values as a list of the Pandas data frame object data with given key 
+#         '''
+#         return list(self.data.get(key))
 
  
-def import_timeseries(filename, time_column, value_column, properties = {}, plot_show = False, **kwargs):
-    '''
-    filename : csv file with columns for data values 
-    (The column numbers start at 1)
-    time_column : the column number in the file that has all the time series indexes that you want to import
-    value_column : the column number in the file that has all the corresponding values that you want to import 
-    properties : Optional dictionary to specify other properties that the imported data must satisfy. For example, 
-    properties = {3 : 'abc'}, would only impor those rows that have column 3 value equal to 'abc'
-    '''
-    try:
-        import csv
-        from operator import itemgetter
-        from itertools import groupby
-        import math
-    except:
-        print('Packages not found. Make sure csv, operator, itertool, and math are installed.')
+# def import_timeseries(filename, time_column, value_column, properties = {}, plot_show = False, **kwargs):
+#     '''
+#     filename : csv file with columns for data values 
+#     (The column numbers start at 1)
+#     time_column : the column number in the file that has all the time series indexes that you want to import
+#     value_column : the column number in the file that has all the corresponding values that you want to import 
+#     properties : Optional dictionary to specify other properties that the imported data must satisfy. For example, 
+#     properties = {3 : 'abc'}, would only impor those rows that have column 3 value equal to 'abc'
+#     '''
+#     try:
+#         import csv
+#         from operator import itemgetter
+#         from itertools import groupby
+#         import math
+#     except:
+#         print('Packages not found. Make sure csv, operator, itertool, and math are installed.')
 
-    delimiter = kwargs.get('delimiter')
-    if not delimiter:
-        delimiter = ','
-    with open(filename) as csv_file:
-        csv_reader = csv.reader(csv_file, delimiter= delimiter)
-        data_dict = {}
-        data_dict_list = []
-        for row in csv_reader:
-            if row and row[time_column - 1] and row[value_column - 1]:
-                if properties:
-                    for col, value in properties.items():
-                        if row[col - 1] == str(value):
-                            data_dict[float(row[time_column - 1])] = float(row[value_column - 1])
-                        else:
-                            break 
-                else:
-                    cell_t = row[time_column - 1]
-                    cell_v = row[value_column - 1]
-                    temp_str_t = cell_t.replace('.','',1).replace('e','',1).replace('-','',1)
-                    temp_str_v = cell_v.replace('.','',1).replace('e','',1).replace('-','',1)
-                    if temp_str_t.isdigit() and temp_str_v.isdigit():
-                        data_dict[float(cell_t)] = float(cell_v)
-            data_dict_list.append(data_dict)
-        # Create Pandas dataframe out of dictionary
-        data_pd = pd.DataFrame(data_dict_list)
-        data_obj = ExpData(filename, 'timeseries', data_pd)
-        if plot_show:
-            time = list(data_obj.get_keys())
-            values = list(data_obj.get_values(data_pd.keys()))
-            try:
-                import matplotlib.pyplot as plt
-            except:
-                raise Exception('matplotlib not installed.')
-            max_time = math.floor(max(time))
-            index = []
-            for i in range(len(time)):
-                if int(math.floor(float(time[i]))) == max_time:
-                    index.append(i)
-            final_index = []
-            for k, g in groupby(enumerate(index), lambda x:x[1]-x[0]):
-                map_t = map(itemgetter(1), g)
-                final_index.append(max(map_t)+1)
-            init_time_index = 0
-            for i in final_index:
-                plt.plot(time[init_time_index:i],values[init_time_index:i])
-                plt.show()
-                init_time_index = i
-    return data_obj
+#     delimiter = kwargs.get('delimiter')
+#     if not delimiter:
+#         delimiter = ','
+#     with open(filename) as csv_file:
+#         csv_reader = csv.reader(csv_file, delimiter= delimiter)
+#         data_dict = {}
+#         data_dict_list = []
+#         for row in csv_reader:
+#             if row and row[time_column - 1] and row[value_column - 1]:
+#                 if properties:
+#                     for col, value in properties.items():
+#                         if row[col - 1] == str(value):
+#                             data_dict[float(row[time_column - 1])] = float(row[value_column - 1])
+#                         else:
+#                             break 
+#                 else:
+#                     cell_t = row[time_column - 1]
+#                     cell_v = row[value_column - 1]
+#                     temp_str_t = cell_t.replace('.','',1).replace('e','',1).replace('-','',1)
+#                     temp_str_v = cell_v.replace('.','',1).replace('e','',1).replace('-','',1)
+#                     if temp_str_t.isdigit() and temp_str_v.isdigit():
+#                         data_dict[float(cell_t)] = float(cell_v)
+#             data_dict_list.append(data_dict)
+#         # Create Pandas dataframe out of dictionary
+#         data_pd = pd.DataFrame(data_dict_list)
+#         data_obj = ExpData(filename, 'timeseries', data_pd)
+#         if plot_show:
+#             time = list(data_obj.get_keys())
+#             values = list(data_obj.get_values(data_pd.keys()))
+#             try:
+#                 import matplotlib.pyplot as plt
+#             except:
+#                 raise Exception('matplotlib not installed.')
+#             max_time = math.floor(max(time))
+#             index = []
+#             for i in range(len(time)):
+#                 if int(math.floor(float(time[i]))) == max_time:
+#                     index.append(i)
+#             final_index = []
+#             for k, g in groupby(enumerate(index), lambda x:x[1]-x[0]):
+#                 map_t = map(itemgetter(1), g)
+#                 final_index.append(max(map_t)+1)
+#             init_time_index = 0
+#             for i in final_index:
+#                 plt.plot(time[init_time_index:i],values[init_time_index:i])
+#                 plt.show()
+#                 init_time_index = i
+#     return data_obj
     

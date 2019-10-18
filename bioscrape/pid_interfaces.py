@@ -1,13 +1,15 @@
 
 from bioscrape.inference import DeterministicLikelihood as DLL
 from bioscrape.inference import StochasticTrajectoriesLikelihood as STLL
+from bioscrape.inference import StochasticStatesLikelihood as SSLL
 from bioscrape.inference import StochasticTrajectories
 from bioscrape.inference import BulkData
+from bioscrape.inference import FlowData 
 
 import numpy as np
+from scipy.stats import norm
 
 def check_priors(param_dict, prior):
-    import scipy.stats
     for key,value in param_dict.items():
         type = prior[key][0]
         if type == 'uniform':
@@ -23,7 +25,7 @@ def check_priors(param_dict, prior):
             mu = prior[key][1]
             sig = prior[key][2]
             prob_threshold = prior[key][3]
-            distrib = scipy.stats.norm(mu, sig)
+            distrib = norm(mu, sig)
             # Check if value lies is a valid sample of (mu, sigma) Gaussian distribution
             if distrib.pdf(value) < prob_threshold:
                 return False
@@ -112,5 +114,95 @@ class DeterministicInference(object):
         
 
 
+class StochasticStatesInference(object):
+    def __init__(self, params_to_estimate, M, priors):
+        self.params = params_to_estimate
+        self.M = M
+        self.priors = priors
+        return
 
+    def get_likelihood_function(self, log_params, data, timepoints, measurements, initial_conditions, 
+                                norm_order = None, moment_order = 2, moment_weights = [], N_simulations = 100, debug = False):
+        M = self.M
+        params_dict = {}
+        params_exp = np.exp(log_params)
+        for key, p in zip(M.get_params2index().keys(),params_exp):
+            params_dict[key] = p
+        # Priors (uniform priors only implemented)
+        priors = self.priors
+        # Check prior
+        if check_priors(params_dict, priors) == False:
+            return -np.inf
+
+        N = np.shape(data)[1]
+        nS = np.shape(data)[0]
+
+        if debug:
+            print('The time samples shape is {0}'.format(np.shape(timepoints)))
+            print('The data shape is {0}'.format(np.shape(data)))
+            print('The measurmenets is {0}'.format(measurements))
+            print('The N is {0}'.format(N))
+            print('The nS is {0}'.format(nS))
+
+        dataflow = FlowData(np.array(timepoints), data, measurements, N)
+        #If there are multiple initial conditions in a data-set, should correspond to multiple initial conditions for inference.
+        #Note len(initial_conditions) must be equal to the number of trajectories N
+        LL_flow = SSLL(model = M, init_state = initial_conditions,
+        data = dataflow, N_simulations = N_simulations, norm_order = norm_order, moment_order = moment_order, moment_weights = moment_weights)
+        # Set params here and return the likelihood object.
+        if LL_flow:
+            # if debug:
+            #     print('setting {0} to LL_stoch object'.format(params_dict))
+            LL_flow.set_init_params(params_dict)
+            return -LL_flow.py_log_likelihood()
+
+ 
+
+class StochasticSensorFusion(object):
+    def __init__(self, params_to_estimate, M, priors):
+        self.params = params_to_estimate
+        self.M = M
+        self.priors = priors
+        return
+
+    def get_likelihood_function(self, log_params, data, timepoints, measurements, initial_conditions, 
+                                norm_order = None, moment_order = 2, moment_weights = [], N_simulations = 100, debug = False):
+        M = self.M
+        params_dict = {}
+        params_exp = np.exp(log_params)
+        for key, p in zip(M.get_params2index().keys(),params_exp):
+            params_dict[key] = p
+        # Priors (uniform priors only implemented)
+        priors = self.priors
+        # Check prior
+        if check_priors(params_dict, priors) == False:
+            return -np.inf
+
+        N = np.shape(data)[1]
+        nS = np.shape(data)[0]
+
+        if debug:
+            print('The time samples shape is {0}'.format(np.shape(timepoints)))
+            print('The data shape is {0}'.format(np.shape(data)))
+            print('The measurmenets is {0}'.format(measurements))
+            print('The N is {0}'.format(N))
+            print('The nS is {0}'.format(nS))
+
+        dataflow = FlowData(np.array(timepoints), data, measurements, N)
+        dataStoch = StochasticTrajectories(np.array(timepoints), data, measurements, N)
+        #If there are multiple initial conditions in a data-set, should correspond to multiple initial conditions for inference.
+        #Note len(initial_conditions) must be equal to the number of trajectories N
+        LL_flow = SSLL(model = M, init_state = initial_conditions,
+        data = dataflow, N_simulations = N_simulations, norm_order = norm_order, moment_order = moment_order, moment_weights = moment_weights)
+        LL_stoch = STLL(model = M, init_state = initial_conditions,
+        data = dataStoch, N_simulations = N_simulations, norm_order = norm_order)
+        # Set params here and return the likelihood object.
+        if LL_flow and LL_stoch:
+            # if debug:
+            #     print('setting {0} to LL_stoch object'.format(params_dict))
+            LL_flow.set_init_params(params_dict)
+            LL_stoch.set_init_params(params_dict)
+            return -LL_stoch.py_log_likelihood() - LL_flow.py_get_likelihood()
+
+ 
 
