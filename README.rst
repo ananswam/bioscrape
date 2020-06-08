@@ -1,5 +1,5 @@
-bioscrape - Biological Stochastic Simulation of Single Cell Reactions and Parameter Estimation
-This package is now based at: https://github.com/biocircuits/bioscrape
+## bioscrape - Biological Stochastic Simulation of Single Cell Reactions and Parameter Estimation
+# This package is now based at: https://github.com/biocircuits/bioscrape
 ==============================================================================================
 
 |Build Status|
