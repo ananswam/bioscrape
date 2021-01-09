@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Cython stuff
+cython_debug
+
 # C extensions
 *.so
 *.cpp
@@ -14,6 +17,9 @@ cython_example.ipynb
 
 # MacOS junk
 .DS_Store
+
+# VScode junk
+.vscode/
 
 # Distribution / packaging
 .Python
@@ -122,5 +128,8 @@ examples/models/txtl_model.xml
 examples/models/random_model.xml
 examples/models/random_model_sbml.xml
 examples/models/sbml_test_bioscrape.xml
-
-
+examples/models/sbml_test_bioscrape.xml
+examples/models/represillator_bioscrape.xml
+examples/models/represillator_sbml_back.xml
+examples/models/txtl_model_sbml.xml
+MANIFEST

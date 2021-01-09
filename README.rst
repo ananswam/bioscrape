@@ -6,6 +6,10 @@ This package is now based at: https://github.com/biocircuits/bioscrape
 |Build Status|
 
 For more information, please visit https://github.com/biocircuits/bioscrape.
+=======
+Bioscrape is a Chemical Reaction Network Simulator written in cython for speed and python compatability. It can be used for deterministic, stochastic, or single cell simulation and also has parameter inference capabilities.
 
-.. |Build Status| image:: https://travis-ci.org/ananswam/bioscrape.svg?branch=master
-   :target: https://travis-ci.org/ananswam/bioscrape
+For more information, please visit https://github.com/biocircuits/bioscrape/wiki.
+
+.. |Build Status| image:: https://travis-ci.org/biocircuits/bioscrape.svg?branch=master
+   :target: https://travis-ci.org/biocircuits/bioscrape

@@ -1,0 +1,10 @@
+matplotlib
+pytest
+numpy
+scipy
+Cython
+python-libsbml
+beautifulsoup4
+sympy
+emcee
+pandas

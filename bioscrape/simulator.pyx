@@ -12,6 +12,7 @@ from types cimport Model, Delay, Propensity, Rule
 from scipy.integrate import odeint, ode
 import sys
 import warnings
+import logging
 
 
 ##################################################                ####################################################
@@ -266,7 +267,7 @@ cdef class CSimInterface:
 
     #Checks model or interface is valid. Meant to be overriden by the subclass
     cdef void check_interface(self):
-        warnings.warn("No interface Checking Implemented")
+        logging.info("No interface Checking Implemented")
     # meant to be overriden by the subclass
     cdef double compute_delay(self, double *state, unsigned rxn_index):
         return 0.0
@@ -393,11 +394,10 @@ cdef class CSimInterface:
         self.prep_deterministic_simulation()
 
     # Compute deterministic derivative
-    cdef void calculate_determinstic_derivative(self, double *x, double *dxdt, double t):
+    cdef void calculate_deterministic_derivative(self, double *x, double *dxdt, double t):
         # Get propensities before doing anything else.
         cdef double *prop = <double*> (self.propensity_buffer.data)
         self.compute_propensities(x,  prop, t)
-
 
         cdef unsigned s
         cdef unsigned j
@@ -409,7 +409,7 @@ cdef class CSimInterface:
 
     def py_calculate_deterministic_derivative(self, np.ndarray[np.double_t,ndim=1] x, np.ndarray[np.double_t,ndim=1] dx,
                                               double t):
-        self.calculate_determinstic_derivative(<double*> x.data, <double*> dx.data, t)
+        self.calculate_deterministic_derivative(<double*> x.data, <double*> dx.data, t)
 
 
 
@@ -419,7 +419,7 @@ cdef class ModelCSimInterface(CSimInterface):
         #Check Model and initialization
         if not self.model.initialized:
             self.model.py_initialize()
-            warnings.warn("Uninitialized Model Passed into ModelCSimInterface. Model.py_initialize() called automatically.")
+            logging.info("Uninitialized Model Passed into ModelCSimInterface. Model.py_initialize() called automatically.")
         self.check_interface()
         self.c_propensities = self.model.get_c_propensities()
         self.c_delays = self.model.get_c_delays()
@@ -433,6 +433,12 @@ cdef class ModelCSimInterface(CSimInterface):
         self.num_species = self.update_array.shape[0]
         self.dt = 0.01
 
+    cdef unsigned get_number_of_species(self):
+        return self.num_species
+
+    cdef unsigned get_number_of_reactions(self):
+        return self.num_reactions
+        
     cdef void check_interface(self):
         if not self.model.initialized:
             raise RuntimeError("Model has been changed since CSimInterface instantiation. CSimInterface no longer valid.")
@@ -559,6 +565,33 @@ cdef class SafeModelCSimInterface(ModelCSimInterface):
             warnings.warn("Volume="+str(volume)+" > Max Volume="+str(self.max_volume))
         elif volume <= 0:
             warnings.warn("Volume="+str(volume)+" > Max Volume="+str(self.max_volume))
+
+    # Compute deterministic derivative
+    # This version safegaurds against species counts going negative 
+    # by not allowing reactions to fire if they consume a species of 0 concentration.
+    cdef void calculate_deterministic_derivative(self, double *x, double *dxdt, double t):
+        # Get propensities before doing anything else.
+        cdef double *prop = <double*> (self.propensity_buffer.data)
+        self.compute_propensities(x,  prop, t)
+
+        cdef unsigned s
+        cdef unsigned j
+        for s in range(self.num_species):
+
+            #Reset negative species concentrations to 0
+            if x[s] < 0:
+                x[s] = 0
+
+            dxdt[s] = 0
+            for j in range(self.S_indices[s].size()):
+                if self.S_values[s][j] <= 0 and x[s] <= 0:
+                    pass #Skip reactions that consume species of 0 concentration
+                else:
+                    dxdt[s] += prop[ self.S_indices[s][j]  ] * self.S_values[s][j]
+
+            #Verify that species do not go negative.
+            if x[s] <= 0 and dxdt[s] < 0:
+                dxdt[s] = 0
 
 cdef class SSAResult:
     def __init__(self, np.ndarray timepoints, np.ndarray result):
@@ -1243,11 +1276,21 @@ cdef class RegularSimulator:
 cdef void* global_simulator
 cdef np.ndarray global_derivative_buffer
 
+def py_global_derivative_buffer():
+    global global_derivative_buffer
+    return global_derivative_buffer
+
+def py_set_globals(CSimInterface sim):
+    global global_simulator
+    global global_derivative_buffer
+    global_simulator = <void*> sim
+    global_derivative_buffer = np.empty(sim.py_get_num_species(),)
+
 def rhs_global(np.ndarray[np.double_t,ndim=1] state, double t):
     global global_simulator
     global global_derivative_buffer
     (<CSimInterface>global_simulator).apply_repeated_rules(<double*> state.data,t)
-    (<CSimInterface>global_simulator).calculate_determinstic_derivative( <double*> state.data,
+    (<CSimInterface>global_simulator).calculate_deterministic_derivative( <double*> state.data,
                                                                          <double*> global_derivative_buffer.data, t)
     return global_derivative_buffer
 
@@ -1302,7 +1345,7 @@ cdef class DeterministicSimulator(RegularSimulator):
                         sim.apply_repeated_rules( &(results[index,0]),timepoints[index] )
                 return SSAResult(timepoints,results)
 
-            sys.stderr.write('odeint failed with mxstep=%d...' % (steps_allowed))
+            logging.info('odeint failed with mxstep=%d...' % (steps_allowed))
 
             # make the mxstep bigger if the user specified a bigger max
             if steps_allowed >= self.mxstep:
@@ -1376,7 +1419,7 @@ cdef class DeterministicDilutionSimulator(RegularSimulator):
                         sim.apply_repeated_rules( &(results[index,0]), timepoints[index] )
                 return SSAResult(timepoints,results)
 
-            sys.stderr.write('odeint failed with mxstep=%d...' % (steps_allowed))
+            logging.info('odeint failed with mxstep=%d...' % (steps_allowed))
 
             # make the mxstep bigger if the user specified a bigger max
             if steps_allowed >= self.mxstep:
@@ -2013,22 +2056,20 @@ cdef class DelayVolumeSSASimulator(DelayVolumeSimulator):
 
 
 #A wrapper function to allow easy simulation of Models
-def py_simulate_model(timepoints, Model = None, Interface = None, stochastic = False, delay = None, safe = False, volume = False, return_dataframe = True):
+def py_simulate_model(timepoints, Model = None, Interface = None, stochastic = False, 
+                    delay = None, safe = False, volume = False, return_dataframe = True):
     #Check model and interface
-    if Model == None and Interface == None:
+    if Model is None and Interface is None:
         raise ValueError("py_simulate_model requires either a Model or CSimInterface to be passed in.")
-    elif Model!=None and Interface!=None:
-        raise ValueError("py_simulate_model requires either a Model OR a CSimInterface to be passed in. Note both.")
-    elif Interface == None:
-        if safe and stochastic:
+    elif not Model is None and not Interface is None:
+        raise ValueError("py_simulate_model requires either a Model OR a CSimInterface to be passed in. Not both.")
+    elif Interface is None:
+        if safe:
             Interface = SafeModelCSimInterface(Model)
-        elif safe:
-            warnings.warn("Safe=True is only an option for stochastic simulation")
-            Interface = ModelCSimInterface(Model)
         else:
             Interface = ModelCSimInterface(Model)
-    elif Interface != None and safe:
-        warnings.warn("Cannot gaurantee that the interface passed in is safe. Simulating anyway.")
+    elif not Interface is None and safe:
+        logging.info("Cannot gaurantee that the interface passed in is safe. Simulating anyway.")
 
     #Create Volume (if necessary)
     if isinstance(volume, Volume):
@@ -2071,7 +2112,7 @@ def py_simulate_model(timepoints, Model = None, Interface = None, stochastic = F
             result = Sim.py_volume_simulate(Interface, v, timepoints)
     else:
         if v != None:
-            warnings.warn("uncessary volume parameter for deterministic simulation.")
+            logging.info("uncessary volume parameter for deterministic simulation.")
         Sim = DeterministicSimulator()
         Interface.py_prep_deterministic_simulation()
         result = Sim.py_simulate(Interface, timepoints)

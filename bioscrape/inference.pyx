@@ -6,6 +6,7 @@ from types import Model
 from types cimport Model
 from simulator cimport CSimInterface, RegularSimulator, ModelCSimInterface, DeterministicSimulator, SSASimulator
 from simulator import CSimInterface, RegularSimulator, ModelCSimInterface, DeterministicSimulator, SSASimulator
+from emcee_interface import initialize_mcmc
 import sys
 
 import emcee
@@ -314,13 +315,14 @@ cdef class DeterministicLikelihood(ModelLikelihood):
     cdef double get_log_likelihood(self):
         
         # Write in the specific parameters and species values.
-        cdef np.ndarray species_vals = self.m.get_species_values()
-        cdef np.ndarray param_vals = self.m.get_params_values()
-        cdef np.ndarray ans
-        cdef np.ndarray timepoints
-        cdef unsigned i
+        cdef np.ndarray[np.double_t, ndim = 1] species_vals = self.m.get_species_values()
+        cdef np.ndarray[np.double_t, ndim = 1] param_vals = self.m.get_params_values()
+        cdef np.ndarray[np.double_t, ndim = 2] ans
+        cdef np.ndarray[np.double_t, ndim = 1] timepoints
+        cdef unsigned i, t
         cdef double error = 0.0
-        cdef np.ndarray measurements = self.bd.get_measurements()
+        cdef double dif = 0
+        cdef np.ndarray[np.double_t, ndim = 3] measurements = self.bd.get_measurements()
 
         for n in range(self.N):
             #Set Timepoints
@@ -328,8 +330,6 @@ cdef class DeterministicLikelihood(ModelLikelihood):
                 timepoints = self.bd.get_timepoints()[n, :]
             else:
                 timepoints = self.bd.get_timepoints()
-
-            
 
             #Set initial parameters
             if self.init_param_indices is not None:
@@ -343,12 +343,22 @@ cdef class DeterministicLikelihood(ModelLikelihood):
                 for i in range(self.M):
                     species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
             
+            #print("n-loop setup", t11-t10)
             # Do a simulation of the model with time points specified by the data.
             ans = self.propagator.simulate(self.csim, timepoints).get_result()
+
+            #print("simulation", t12-t11)
             # Compare the data using norm and return the likelihood.
             for i in range(self.M):
-                error += np.linalg.norm(self.bd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
-       
+                for t in range(len(timepoints)):
+                    dif = measurements[n, t, i] - ans[t,self.meas_indices[i]]
+                    if dif < 0:
+                        dif = -dif
+                    error += dif**self.norm_order
+            #print("norm calc", t13-t12)
+
+        error = error**(1./self.norm_order)
+
         return -error
 
 cdef class StochasticTrajectoriesLikelihood(ModelLikelihood):
@@ -405,15 +415,17 @@ cdef class StochasticTrajectoriesLikelihood(ModelLikelihood):
 
     cdef double get_log_likelihood(self):
         # Write in the specific parameters and species values.
-        cdef np.ndarray species_vals = self.m.get_species_values()
-        cdef np.ndarray param_vals = self.m.get_params_values()
-        cdef np.ndarray ans
-        cdef np.ndarray timepoints
+        cdef np.ndarray[np.double_t, ndim = 1] species_vals = self.m.get_species_values()
+        cdef np.ndarray[np.double_t, ndim = 1] param_vals = self.m.get_params_values()
+        cdef np.ndarray[np.double_t, ndim = 1] timepoints
 
         cdef unsigned i
         cdef unsigned n
         cdef unsigned s
         cdef double error = 0.0
+        cdef double dif = 0
+        cdef np.ndarray[np.double_t, ndim = 2] ans
+        cdef np.ndarray[np.double_t, ndim = 3] measurements = self.sd.get_measurements()
 
         # Do N*N_simulations simulations of the model with time points specified by the data.
         for n in range(self.N):
@@ -422,9 +434,6 @@ cdef class StochasticTrajectoriesLikelihood(ModelLikelihood):
                 timepoints = self.sd.get_timepoints()[n, :]
             else:
                 timepoints = self.sd.get_timepoints()
-
-
-
             for s in range(self.N_simulations):
                 #Set initial parameters (inside loop in case they change in the simulation):
                 if self.init_param_indices is not None:
@@ -438,17 +447,17 @@ cdef class StochasticTrajectoriesLikelihood(ModelLikelihood):
                 elif self.Nx0 == self.N: #Different initial conditions for different simulations
                     for i in range(self.M):
                         species_vals[ self.init_state_indices[i, n] ] = self.init_state_vals[i, n]
-
-                
-
                 ans = self.propagator.simulate(self.csim, timepoints).get_result()
 
-
                 for i in range(self.M):
-                    error += np.linalg.norm( self.sd.get_measurements()[n, :,i] - ans[:,self.meas_indices[i]], ord = self.norm_order)
-                
+                    # Compare the data using norm and return the likelihood.
+                    for t in range(len(timepoints)):
+                        dif = measurements[n, t, i] - ans[t,self.meas_indices[i]]
+                        if dif < 0:
+                            dif = -dif
+                        error += dif**self.norm_order
 
-
+        error = error**(1./self.norm_order)
         return -1.0*error/(1.0*self.N_simulations)
 
 cdef class StochasticTrajectoryMomentLikelihood(StochasticTrajectoriesLikelihood):
@@ -481,112 +490,37 @@ cdef class StochasticStatesLikelihood(ModelLikelihood):
         for i in range(len(the_list)):
             self.meas_indices[i] = self.m.get_species_index(the_list[i])
 
-##################################################                ####################################################
-######################################              PRIORS        ######################################
-#################################################                     ################################################
 
-# cdef class Prior(Distribution):
-#     cdef double get_log_likelihood(self):
-#         cdef np.ndarray param_vals = self.m.get_params_values()
-#         for value in param_vals:
-#             if value > max(range) or value < min(range):
-#                 return 0
-#             else:
-#                 return 1
+def py_inference(Model = None, params_to_estimate = None, exp_data = None, initial_conditions = None,
+                measurements = None, time_column = None, nwalkers = None, nsteps = None,
+                init_seed = None, prior = None, sim_type = None, plot_show = True, **kwargs):
+    
+    if Model is None:
+        raise ValueError('Model object cannot be None.')
+        
+    pid = initialize_mcmc(Model = Model, **kwargs)
+    if exp_data is not None:
+        pid.set_exp_data(exp_data)
+    if measurements is not None:
+        pid.set_measurements(measurements)
+    if initial_conditions is not None:
+        pid.set_initial_conditions(initial_conditions)
+    if time_column is not None:
+        pid.set_time_column(time_column)
+    if nwalkers is not None:
+        pid.set_nwalkers(nwalkers)
+    if init_seed is not None:
+        pid.set_init_seed(init_seed)
+    if nsteps is not None:
+        pid.set_nsteps(nsteps)
+    if sim_type is not None:
+        pid.set_sim_type(sim_type)
+    if params_to_estimate is not None:
+        pid.set_params_to_estimate(params_to_estimate)
+    if prior is not None:
+        pid.set_prior(prior)
 
- 
-##################################################                ####################################################
-######################################              INFERENCE                         ################################
-#################################################                     ################################################
-
-# Obsolete code 
-
-# cdef class DeterministicInference:
-#     def __init__(self):
-#         self.m = None
-#         self.params_to_estimate = np.zeros(0,dtype=int)
-#         self.global_init_params = np.zeros(0,)
-#         self.global_init_state  = np.zeros(0,)
-#         self.prior = None
-#         self.num_walkers = 500
-#         self.num_iterations = 100
-#         self.likelihoods = []
-#         self.dimension = 0
-#         self.sigma = 10
-
-#     def set_model(self, Model m):
-#         self.m = m
-#         self.global_init_params = m.get_params_values().copy()
-#         self.global_init_state = m.get_species_values().copy()
-
-#     def set_sigma(self, double s):
-#         self.sigma = s
-
-#     def set_mcmc_params(self, unsigned walkers, unsigned iterations):
-#         self.num_walkers = walkers
-#         self.num_iterations = iterations
-
-#     def set_prior(self, Distribution prior):
-#         self.prior = prior
-
-#     def set_params_to_estimate(self, list params):
-#         self.params_to_estimate = np.zeros(len(params),dtype=int)
-#         cdef unsigned i
-#         for i in range(len(params)):
-#             self.params_to_estimate[i] =  self.m.get_param_index(params[i])
-
-#         self.dimension = len(params)
-
-#     def add_to_likelihood(self,list likelihoods):
-#         self.likelihoods.extend(likelihoods)
-
-#     def likelihood_function(self, np.ndarray params):
-#         cdef unsigned i
-#         cdef unsigned j
-#         cdef double answer = self.prior.unprob(params)
-
-#         if answer == 0.0:
-#             return -np.inf
-
-#         answer = log(answer)
-
-#         cdef np.ndarray actual_species = self.m.get_species_values()
-#         cdef np.ndarray actual_params = self.m.get_params_values()
-
-#         for i in range(len(self.likelihoods)):
-#             # Copy in the global initial conditions.
-#             np.copyto(actual_species, self.global_init_state)
-#             np.copyto(actual_params, self.global_init_params)
-
-#             # Then copy in the specified parameters
-#             for j in range(self.params_to_estimate.shape[0]):
-#                 actual_params[ self.params_to_estimate[j] ]  = params[j]
-
-#             # The run the likelihood
-#             answer += (<Likelihood> self.likelihoods[i]).get_log_likelihood()
-
-#         return answer / self.sigma**2
-
-#     def py_likelihood_function(self, np.ndarray params):
-#         return self.likelihood_function(params)
-
-#     def run_mcmc(self, p0 = None):
-#         def lnprob(np.ndarray theta):
-#             loglhood = self.likelihood_function(np.exp(theta))
-#             if np.isnan(loglhood):
-#                 sys.stderr.write('Parameters returned NaN likelihood: ' + str(np.exp(theta)) + '\n')
-#                 sys.stderr.flush()
-#                 return -np.Inf
-#             return loglhood
-
-#         sampler = emcee.EnsembleSampler(self.num_walkers, self.dimension, lnprob)
-#         if p0 is None:
-#             p0 = np.random.randn(self.dimension*self.num_walkers).reshape((self.num_walkers,self.dimension)) / 20.0
-
-#         for iteration, (pos,lnp,state) in enumerate(sampler.sample(p0,iterations=self.num_iterations)):
-#             print('%.1f percent complete' % (100*float(iteration)/self.num_iterations))
-
-#         return sampler
-
-
-
+    sampler = pid.run_mcmc(plot_show = plot_show, **kwargs)
+    if plot_show:
+        pid.plot_mcmc_results(sampler, **kwargs)
+    return sampler, pid
